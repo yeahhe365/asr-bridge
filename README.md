@@ -1,5 +1,7 @@
 # Fun-ASR OpenAI Proxy
 
+[![linux.do](https://shorturl.at/ggSqS)](https://linux.do)
+
 Local OpenAI-compatible transcription proxy for Alibaba Cloud Bailian Fun-ASR.
 
 It is meant for apps such as Spokenly that let you configure an OpenAI-compatible
