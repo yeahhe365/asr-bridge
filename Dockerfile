@@ -10,8 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
+COPY asr_bridge ./asr_bridge
 COPY fun_asr_openai_proxy ./fun_asr_openai_proxy
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-sync", "python", "-m", "fun_asr_openai_proxy"]
+CMD ["uv", "run", "--no-sync", "python", "-m", "asr_bridge"]

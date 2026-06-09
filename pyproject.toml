@@ -1,7 +1,7 @@
 [project]
-name = "fun-asr-openai-proxy"
+name = "asr-bridge"
 version = "0.1.0"
-description = "OpenAI-compatible transcription proxy for Alibaba Cloud Bailian Fun-ASR."
+description = "ASR Bridge: OpenAI-compatible transcription proxy for Bailian Fun-ASR and Doubao ASR."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

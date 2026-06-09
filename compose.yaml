@@ -1,7 +1,9 @@
+name: asr-bridge
+
 services:
-  fun-asr-openai-proxy:
+  asr-bridge:
     build: .
-    container_name: fun-asr-openai-proxy
+    container_name: asr-bridge
     env_file:
       - .env
     environment:

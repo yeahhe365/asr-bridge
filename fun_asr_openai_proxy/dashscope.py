@@ -14,12 +14,21 @@ class DashScopeError(RuntimeError):
 
 
 @dataclass
+class VocabularyWord:
+    text: str
+    weight: int = 4
+    lang: str = "zh"
+
+
+@dataclass
 class DashScopeFunASRClient:
     api_key: str
     base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     http_client: httpx.AsyncClient | None = None
     poll_interval_seconds: float = 1.0
     timeout_seconds: float = 300.0
+    default_language_hints: list[str] | None = None
+    default_vocabulary_id: str | None = None
 
     async def transcribe(
         self,
@@ -29,6 +38,8 @@ class DashScopeFunASRClient:
         filename: str,
         model: str,
         language: str | None,
+        language_hints: list[str] | None,
+        vocabulary_id: str | None,
     ) -> str:
         del filename
         client = self.http_client or httpx.AsyncClient(timeout=60)
@@ -40,6 +51,8 @@ class DashScopeFunASRClient:
                 mime_type=mime_type,
                 model=self._dashscope_model(model),
                 language=language,
+                language_hints=language_hints,
+                vocabulary_id=vocabulary_id,
             )
             result_url = await self._wait_for_result_url(client=client, task_id=task_id)
             if result_url is None:
@@ -57,6 +70,8 @@ class DashScopeFunASRClient:
         mime_type: str,
         model: str,
         language: str | None,
+        language_hints: list[str] | None,
+        vocabulary_id: str | None,
     ) -> str:
         payload: dict[str, Any] = {
             "model": model,
@@ -65,8 +80,15 @@ class DashScopeFunASRClient:
             },
             "parameters": {"channel_id": [0]},
         }
-        if language:
-            payload["parameters"]["language_hints"] = [language]
+        effective_language_hints = self._effective_language_hints(
+            language=language,
+            language_hints=language_hints,
+        )
+        if effective_language_hints:
+            payload["parameters"]["language_hints"] = effective_language_hints
+        effective_vocabulary_id = vocabulary_id or self.default_vocabulary_id
+        if effective_vocabulary_id:
+            payload["parameters"]["vocabulary_id"] = effective_vocabulary_id
 
         response = await client.post(
             f"{self.base_url}/services/audio/asr/transcription",
@@ -83,6 +105,48 @@ class DashScopeFunASRClient:
         if not task_id:
             raise DashScopeError(f"DashScope did not return a task_id: {data}")
         return str(task_id)
+
+    async def create_vocabulary(
+        self,
+        *,
+        prefix: str,
+        target_model: str,
+        vocabulary: list[VocabularyWord],
+    ) -> dict[str, object]:
+        client = self.http_client or httpx.AsyncClient(timeout=60)
+        close_client = self.http_client is None
+        try:
+            response = await client.post(
+                f"{self.base_url}/services/audio/asr/customization",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "speech-biasing",
+                    "input": {
+                        "action": "create_vocabulary",
+                        "target_model": self._dashscope_model(target_model),
+                        "prefix": prefix,
+                        "vocabulary": [
+                            {
+                                "text": word.text,
+                                "weight": word.weight,
+                                "lang": word.lang,
+                            }
+                            for word in vocabulary
+                        ],
+                    },
+                },
+            )
+            data = self._json_or_error(response)
+            output = data.get("output")
+            if not isinstance(output, dict) or not output.get("vocabulary_id"):
+                raise DashScopeError(f"DashScope did not return a vocabulary_id: {data}")
+            return output
+        finally:
+            if close_client:
+                await client.aclose()
 
     async def _wait_for_result_url(
         self, *, client: httpx.AsyncClient, task_id: str
@@ -175,6 +239,19 @@ class DashScopeFunASRClient:
         )
 
     def _dashscope_model(self, requested_model: str) -> str:
-        if requested_model in {"fun-asr", "fun-asr-2025-08-25"}:
+        if requested_model in {
+            "fun-asr",
+            "fun-asr-mtl",
+            "fun-asr-mtl-2025-08-25",
+        }:
             return requested_model
         return "fun-asr"
+
+    def _effective_language_hints(
+        self, *, language: str | None, language_hints: list[str] | None
+    ) -> list[str] | None:
+        if language_hints:
+            return language_hints
+        if language:
+            return [language]
+        return self.default_language_hints
