@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from unittest.mock import ANY
 
 from fastapi.testclient import TestClient
 
@@ -486,6 +487,7 @@ def test_default_transcriber_routes_doubao_models_from_environment(monkeypatch) 
             "app_id": "test-app-id",
             "access_token": "test-access-token",
             "resource_id": "volc.seedasr.auc",
+            "http_client": ANY,
         }
     ]
 

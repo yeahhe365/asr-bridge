@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import json
 import os
 from typing import Protocol
 
+import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -56,16 +58,27 @@ class RuntimeSettings(BaseModel):
     vocabulary_id: str | None = None
 
 
+MAX_AUDIO_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
 def create_app(
     transcriber: Transcriber | None = None,
     *,
     initial_language_hints: list[str] | None = None,
     initial_vocabulary_id: str | None = None,
 ) -> FastAPI:
+    shared_http_client = httpx.AsyncClient(timeout=60)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await shared_http_client.aclose()
+
     app = FastAPI(
         title="ASR Bridge",
         description="OpenAI-compatible audio transcription proxy for Bailian Fun-ASR and Doubao ASR.",
         version="0.1.0",
+        lifespan=lifespan,
     )
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -118,6 +131,7 @@ def create_app(
         dashscope = (
             DashScopeFunASRClient(
                 api_key=dashscope_api_key,
+                http_client=shared_http_client,
                 default_language_hints=runtime_settings.language_hints,
                 default_vocabulary_id=runtime_settings.vocabulary_id,
             )
@@ -140,6 +154,7 @@ def create_app(
                     os.environ.get("DOUBAO_RESOURCE_ID")
                 )
                 or "volc.seedasr.auc",
+                http_client=shared_http_client,
             )
 
         return ModelRoutingTranscriber(dashscope=dashscope, doubao=doubao)
@@ -242,6 +257,23 @@ def create_app(
                 {"model": model, "filename": file.filename or "audio", "reason": "empty_file"},
             )
             raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        if len(audio_bytes) > MAX_AUDIO_SIZE:
+            max_mb = MAX_AUDIO_SIZE // (1024 * 1024)
+            add_log(
+                "warn",
+                "转写失败",
+                {
+                    "model": model,
+                    "filename": file.filename or "audio",
+                    "reason": "file_too_large",
+                    "bytes": len(audio_bytes),
+                },
+            )
+            raise HTTPException(
+                status_code=413,
+                detail=f"Audio file is too large ({len(audio_bytes)} bytes). Maximum allowed size is {max_mb} MB.",
+            )
 
         log_details = {
             "model": model,
