@@ -197,16 +197,25 @@ async function saveSettings(event) {
   const button = settingsForm.querySelector("button[type=submit]");
   button.disabled = true;
   try {
-    const payload = {
-      language_hints: parseHints(document.querySelector("#language-hints").value),
-      vocabulary_id: document.querySelector("#vocabulary-id").value.trim() || null,
-    };
-    const settings = await requestJson("/api/settings", {
+    const payload = {};
+    const hints = parseHints(document.querySelector("#language-hints").value);
+    if (hints !== null) {
+      payload.language_hints = hints;
+    } else {
+      payload.language_hints = null;
+    }
+    const vocabId = document.querySelector("#vocabulary-id").value.trim();
+    // Only send vocabulary_id if the user explicitly set it; skip when empty
+    // so the server preserves its current value.
+    if (vocabId) {
+      payload.vocabulary_id = vocabId;
+    }
+    await requestJson("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    showOutput({ saved: settings });
+    showOutput(`默认设置已保存。${vocabId ? `热词表: ${vocabId}` : "热词表未设置，使用已有默认值。"}`);
   } catch (error) {
     showOutput(`保存失败：${error.message}`);
   } finally {
@@ -232,12 +241,99 @@ async function createVocabulary(event) {
         vocabulary,
       }),
     });
-    document.querySelector("#vocabulary-id").value = result.vocabulary_id || "";
-    showOutput(result);
+    const vocabId = result.vocabulary_id || "";
+    document.querySelector("#vocabulary-id").value = vocabId;
+    document.querySelector("#transcription-vocabulary-id").value = vocabId;
+    // Auto-save as default setting
+    if (vocabId) {
+      try {
+        await requestJson("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vocabulary_id: vocabId }),
+        });
+      } catch { /* non-blocking */ }
+    }
+    showOutput({ vocabulary_id: vocabId, status: "created", message: "热词表已创建并设为默认" });
+    // Refresh the vocabulary list and auto-check status
+    await loadVocabularies();
+    if (vocabId) {
+      checkVocabularyStatus(vocabId);
+    }
   } catch (error) {
     showOutput(`创建失败：${error.message}`);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function loadVocabularies() {
+  const listEl = document.querySelector("#vocabulary-list");
+  try {
+    const result = await requestJson("/api/vocabularies");
+    const vocabularies = result.data || [];
+    if (vocabularies.length === 0) {
+      listEl.innerHTML = '<p class="hint">暂无热词表，创建一个吧。</p>';
+      return;
+    }
+    listEl.innerHTML = "";
+    for (const vocab of vocabularies) {
+      const id = vocab.vocabulary_id || vocab.id || "";
+      const status = vocab.status || "UNKNOWN";
+      const statusClass = status === "OK" ? "vocab-status-ok" : "vocab-status-pending";
+      const row = document.createElement("div");
+      row.className = "vocab-row";
+      row.innerHTML = `
+        <div class="vocab-info">
+          <span class="vocab-id" title="${escapeHtml(id)}">${escapeHtml(id)}</span>
+          <span class="vocab-status ${statusClass}">${escapeHtml(status)}</span>
+        </div>
+        <div class="vocab-actions">
+          <button class="icon-button vocab-use-btn" type="button" title="设为默认热词表">✓</button>
+          <button class="icon-button vocab-delete-btn" type="button" title="删除热词表">×</button>
+        </div>
+      `;
+      row.querySelector(".vocab-use-btn").addEventListener("click", async () => {
+        document.querySelector("#vocabulary-id").value = id;
+        document.querySelector("#transcription-vocabulary-id").value = id;
+        // Auto-save as default setting
+        try {
+          await requestJson("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ vocabulary_id: id }),
+          });
+        } catch { /* non-blocking */ }
+        showOutput(`已将 ${id} 设为默认热词表`);
+      });
+      row.querySelector(".vocab-delete-btn").addEventListener("click", async () => {
+        if (!confirm(`确定删除热词表 ${id}？此操作不可恢复。`)) return;
+        try {
+          await requestJson(`/api/vocabularies/${encodeURIComponent(id)}`, { method: "DELETE" });
+          await loadVocabularies();
+        } catch (error) {
+          showOutput(`删除失败：${error.message}`);
+        }
+      });
+      listEl.append(row);
+    }
+  } catch (error) {
+    listEl.innerHTML = `<p class="hint">加载失败：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function checkVocabularyStatus(vocabularyId) {
+  try {
+    const result = await requestJson(`/api/vocabularies/${encodeURIComponent(vocabularyId)}`);
+    const status = result.status || "UNKNOWN";
+    if (status === "OK") {
+      showOutput({ vocabulary_id: vocabularyId, status: "OK", message: "热词表已就绪，可以使用" });
+    } else {
+      showOutput({ vocabulary_id: vocabularyId, status, message: "热词表尚未就绪，请稍后刷新重试" });
+    }
+    await loadVocabularies();
+  } catch (error) {
+    showOutput(`查询热词表状态失败：${error.message}`);
   }
 }
 
@@ -428,6 +524,9 @@ async function transcribeRecording() {
 document.querySelector("#reload-settings").addEventListener("click", () => {
   loadSettings().catch((error) => showOutput(`读取失败：${error.message}`));
 });
+document.querySelector("#refresh-vocabularies").addEventListener("click", () => {
+  loadVocabularies().catch((error) => showOutput(`刷新失败：${error.message}`));
+});
 document.querySelector("#add-word").addEventListener("click", () => addWordRow());
 document.querySelector("#clear-output").addEventListener("click", () => showOutput("等待操作"));
 clearLogsButton.addEventListener("click", () => {
@@ -444,6 +543,7 @@ transcriptionForm.addEventListener("submit", transcribeAudio);
 addWordRow({ text: "佬友", weight: 4, lang: "zh" });
 loadHealth();
 loadSettings().catch((error) => showOutput(`读取失败：${error.message}`));
+loadVocabularies();
 loadLogs().catch((error) => appendLogEvent({
   id: `client-${Date.now()}`,
   timestamp: new Date().toISOString(),

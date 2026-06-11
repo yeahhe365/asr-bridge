@@ -12,6 +12,13 @@ DOUBAO_MODEL_NAMES = {
     "doubao-seed-asr",
 }
 
+KNOWN_MODEL_NAMES = DOUBAO_MODEL_NAMES | {
+    "fun-asr",
+    "fun-asr-mtl",
+    "fun-asr-mtl-2025-08-25",
+    "whisper-1",
+}
+
 
 class Transcriber(Protocol):
     async def transcribe(
@@ -32,6 +39,20 @@ class Transcriber(Protocol):
         prefix: str,
         target_model: str,
         vocabulary: list[VocabularyWord],
+    ) -> dict[str, object]: ...
+
+    async def query_vocabulary(
+        self,
+        *,
+        vocabulary_id: str,
+    ) -> dict[str, object]: ...
+
+    async def list_vocabularies(self) -> list[dict[str, object]]: ...
+
+    async def delete_vocabulary(
+        self,
+        *,
+        vocabulary_id: str,
     ) -> dict[str, object]: ...
 
 
@@ -79,6 +100,35 @@ class ModelRoutingTranscriber:
             vocabulary=vocabulary,
         )
 
+    async def query_vocabulary(
+        self,
+        *,
+        vocabulary_id: str,
+    ) -> dict[str, object]:
+        if self.dashscope is None:
+            raise DashScopeError(
+                "DASHSCOPE_API_KEY must be set to query DashScope vocabularies."
+            )
+        return await self.dashscope.query_vocabulary(vocabulary_id=vocabulary_id)
+
+    async def list_vocabularies(self) -> list[dict[str, object]]:
+        if self.dashscope is None:
+            raise DashScopeError(
+                "DASHSCOPE_API_KEY must be set to list DashScope vocabularies."
+            )
+        return await self.dashscope.list_vocabularies()
+
+    async def delete_vocabulary(
+        self,
+        *,
+        vocabulary_id: str,
+    ) -> dict[str, object]:
+        if self.dashscope is None:
+            raise DashScopeError(
+                "DASHSCOPE_API_KEY must be set to delete DashScope vocabularies."
+            )
+        return await self.dashscope.delete_vocabulary(vocabulary_id=vocabulary_id)
+
     def _transcriber_for_model(self, model: str) -> Transcriber:
         if model in DOUBAO_MODEL_NAMES:
             if self.doubao is None:
@@ -87,6 +137,11 @@ class ModelRoutingTranscriber:
                     "must be set to use Doubao ASR models."
                 )
             return self.doubao
+        if model not in KNOWN_MODEL_NAMES:
+            raise DashScopeError(
+                f"Unknown model name: {model!r}. "
+                f"Available models: {sorted(KNOWN_MODEL_NAMES)}"
+            )
         if self.dashscope is None:
             raise DashScopeError(
                 "DASHSCOPE_API_KEY must be set to use DashScope Fun-ASR models."

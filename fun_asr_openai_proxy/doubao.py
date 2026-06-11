@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class DoubaoASRError(RuntimeError):
@@ -56,6 +59,12 @@ class DoubaoASRClient:
                 ),
             )
             return await self._wait_for_result(client=client, request_id=request_id)
+        except DoubaoASRError:
+            raise
+        except httpx.HTTPError as exc:
+            raise DoubaoASRError(
+                f"Doubao ASR network error ({type(exc).__name__}): {exc or 'no detail'}"
+            ) from exc
         finally:
             if close_client:
                 await client.aclose()
@@ -99,13 +108,30 @@ class DoubaoASRClient:
     ) -> str:
         deadline = time.monotonic() + self.timeout_seconds
         last_response: httpx.Response | None = None
+        consecutive_network_errors = 0
 
         while time.monotonic() < deadline:
-            response = await client.post(
-                f"{self.base_url}/query",
-                headers=self._headers(request_id=request_id),
-                json={},
-            )
+            try:
+                response = await client.post(
+                    f"{self.base_url}/query",
+                    headers=self._headers(request_id=request_id),
+                    json={},
+                )
+                consecutive_network_errors = 0
+            except httpx.HTTPError as exc:
+                consecutive_network_errors += 1
+                logger.warning(
+                    "Doubao poll network error (#%d): %s: %s",
+                    consecutive_network_errors, type(exc).__name__, exc or "no detail",
+                )
+                if consecutive_network_errors >= 5:
+                    raise DoubaoASRError(
+                        f"Doubao ASR network error after {consecutive_network_errors} "
+                        f"retries ({type(exc).__name__}): {exc or 'no detail'}"
+                    ) from exc
+                await asyncio.sleep(self.poll_interval_seconds)
+                continue
+
             last_response = response
             status_code = response.headers.get("X-Api-Status-Code", "")
 

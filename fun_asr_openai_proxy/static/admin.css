@@ -245,6 +245,69 @@ label,
   padding-top: 16px;
 }
 
+.vocabulary-list {
+  display: grid;
+  gap: 8px;
+  min-height: 80px;
+}
+
+.vocab-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.vocab-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.vocab-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vocab-status {
+  font-size: 12px;
+  font-weight: 650;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.vocab-status-ok {
+  background: rgba(31, 122, 90, 0.12);
+  color: var(--accent-strong);
+}
+
+.vocab-status-pending {
+  background: rgba(166, 86, 34, 0.12);
+  color: var(--warn);
+}
+
+.vocab-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.vocab-actions .icon-button {
+  width: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  font-size: 16px;
+}
+
 .recording-head {
   display: flex;
   align-items: center;

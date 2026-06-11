@@ -77,49 +77,61 @@
         </section>
 
         <section class="panel">
-          <h2>音频试转写</h2>
-          <form id="transcription-form" class="stack">
-            <div class="grid-form">
-              <label>
-                <span>模型</span>
-                <select id="transcription-model">
-                  <option value="fun-asr">fun-asr</option>
-                  <option value="doubao-asr">doubao-asr</option>
-                </select>
-              </label>
-              <label>
-                <span>本次识别语言</span>
-                <select id="transcription-language-hints">
-                  <option value="">跟随默认设置</option>
-                  <option value="zh">中文</option>
-                  <option value="en">英文</option>
-                  <option value="zh,en">中文 + 英文</option>
-                </select>
-              </label>
-              <label>
-                <span>本次热词表</span>
-                <input id="transcription-vocabulary-id" placeholder="留空跟随默认设置" />
-              </label>
-              <label>
-                <span>音频文件</span>
-                <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg" />
-              </label>
-            </div>
-            <button type="submit">开始转写</button>
-          </form>
-          <div class="recording-box">
-            <div class="recording-head">
-              <h3>录音测试</h3>
-              <span id="recording-status">未录音</span>
-            </div>
-            <div class="button-row">
-              <button id="start-recording" type="button">● 开始录音</button>
-              <button id="stop-recording" type="button" disabled>■ 停止录音</button>
-              <button id="transcribe-recording" type="button" disabled>转写录音</button>
-            </div>
-            <audio id="recorded-audio" controls></audio>
+          <div class="panel-heading">
+            <h2>热词表管理</h2>
+            <button class="icon-button" id="refresh-vocabularies" type="button" title="刷新热词表列表">
+              ↻
+            </button>
+          </div>
+          <div id="vocabulary-list" class="vocabulary-list">
+            <p class="hint">加载中…</p>
           </div>
         </section>
+      </section>
+
+      <section class="panel">
+        <h2>音频试转写</h2>
+        <form id="transcription-form" class="stack">
+          <div class="grid-form">
+            <label>
+              <span>模型</span>
+              <select id="transcription-model">
+                <option value="fun-asr">fun-asr</option>
+                <option value="doubao-asr">doubao-asr</option>
+              </select>
+            </label>
+            <label>
+              <span>本次识别语言</span>
+              <select id="transcription-language-hints">
+                <option value="">跟随默认设置</option>
+                <option value="zh">中文</option>
+                <option value="en">英文</option>
+                <option value="zh,en">中文 + 英文</option>
+              </select>
+            </label>
+            <label>
+              <span>本次热词表</span>
+              <input id="transcription-vocabulary-id" placeholder="留空跟随默认设置" />
+            </label>
+            <label>
+              <span>音频文件</span>
+              <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg" />
+            </label>
+          </div>
+          <button type="submit">开始转写</button>
+        </form>
+        <div class="recording-box">
+          <div class="recording-head">
+            <h3>录音测试</h3>
+            <span id="recording-status">未录音</span>
+          </div>
+          <div class="button-row">
+            <button id="start-recording" type="button">● 开始录音</button>
+            <button id="stop-recording" type="button" disabled>■ 停止录音</button>
+            <button id="transcribe-recording" type="button" disabled>转写录音</button>
+          </div>
+          <audio id="recorded-audio" controls></audio>
+        </div>
       </section>
 
       <section class="panel output-panel">

@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import json
 import os
-from typing import Protocol
 
 import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -16,29 +15,7 @@ from pydantic import BaseModel, Field
 
 from .dashscope import DashScopeError, DashScopeFunASRClient, VocabularyWord
 from .doubao import DoubaoASRClient, DoubaoASRError
-from .providers import ModelRoutingTranscriber
-
-
-class Transcriber(Protocol):
-    async def transcribe(
-        self,
-        *,
-        audio_bytes: bytes,
-        mime_type: str,
-        filename: str,
-        model: str,
-        language: str | None,
-        language_hints: list[str] | None,
-        vocabulary_id: str | None,
-    ) -> str: ...
-
-    async def create_vocabulary(
-        self,
-        *,
-        prefix: str,
-        target_model: str,
-        vocabulary: list[VocabularyWord],
-    ) -> dict[str, object]: ...
+from .providers import ModelRoutingTranscriber, Transcriber
 
 
 class VocabularyWordRequest(BaseModel):
@@ -59,6 +36,24 @@ class RuntimeSettings(BaseModel):
 
 
 MAX_AUDIO_SIZE = 100 * 1024 * 1024  # 100 MB
+SETTINGS_FILE = os.environ.get("RUNTIME_SETTINGS_PATH", "./runtime_settings.json")
+
+
+def _save_settings(settings: RuntimeSettings) -> None:
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings.model_dump(), f, ensure_ascii=False)
+    except OSError as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to save runtime settings: %s", exc)
+
+
+def _load_settings() -> dict[str, object] | None:
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def create_app(
@@ -67,7 +62,9 @@ def create_app(
     initial_language_hints: list[str] | None = None,
     initial_vocabulary_id: str | None = None,
 ) -> FastAPI:
-    shared_http_client = httpx.AsyncClient(timeout=60)
+    shared_http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -84,6 +81,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     configured_transcriber = transcriber
+    _cached_transcriber: Transcriber | None = None
     log_events: deque[dict[str, object]] = deque(maxlen=300)
     log_subscribers: set[asyncio.Queue[dict[str, object]]] = set()
     log_sequence = 0
@@ -95,6 +93,10 @@ def create_app(
         if initial_vocabulary_id is not None
         else _clean_optional_value(os.environ.get("DASHSCOPE_VOCABULARY_ID")),
     )
+    saved = _load_settings()
+    if saved:
+        runtime_settings.language_hints = saved.get("language_hints", runtime_settings.language_hints)
+        runtime_settings.vocabulary_id = saved.get("vocabulary_id", runtime_settings.vocabulary_id)
 
     def add_log(
         level: str,
@@ -115,25 +117,27 @@ def create_app(
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
+                # Drop the oldest event to make room; if the queue was drained
+                # between get and put by another coroutine, the put succeeds.
+                # If QueueEmpty fires on get, the queue is already empty so
+                # put_nowait is guaranteed to succeed.
                 try:
                     queue.get_nowait()
-                    queue.put_nowait(event)
                 except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
                     pass
 
     add_log("info", "服务已启动")
 
-    def get_transcriber() -> Transcriber:
-        if configured_transcriber is not None:
-            return configured_transcriber
-
+    def _build_transcriber() -> Transcriber:
         dashscope_api_key = _clean_optional_value(os.environ.get("DASHSCOPE_API_KEY"))
         dashscope = (
             DashScopeFunASRClient(
                 api_key=dashscope_api_key,
                 http_client=shared_http_client,
-                default_language_hints=runtime_settings.language_hints,
-                default_vocabulary_id=runtime_settings.vocabulary_id,
             )
             if dashscope_api_key
             else None
@@ -159,14 +163,29 @@ def create_app(
 
         return ModelRoutingTranscriber(dashscope=dashscope, doubao=doubao)
 
+    def get_transcriber() -> Transcriber:
+        nonlocal _cached_transcriber
+        if configured_transcriber is not None:
+            return configured_transcriber
+        if _cached_transcriber is None:
+            _cached_transcriber = _build_transcriber()
+        return _cached_transcriber
+
+    def invalidate_transcriber_cache() -> None:
+        nonlocal _cached_transcriber
+        _cached_transcriber = None
+
     @app.get("/", include_in_schema=False)
     async def admin_ui() -> FileResponse:
         return FileResponse(os.path.join(static_dir, "index.html"))
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> FileResponse:
+        favicon_path = os.path.join(static_dir, "favicon.png")
+        if not os.path.isfile(favicon_path):
+            raise HTTPException(status_code=404, detail="Favicon not found.")
         return FileResponse(
-            os.path.join(static_dir, "favicon.png"),
+            favicon_path,
             media_type="image/png",
         )
 
@@ -180,14 +199,19 @@ def create_app(
 
     @app.put("/api/settings")
     async def update_settings(settings: RuntimeSettings) -> RuntimeSettings:
-        runtime_settings.language_hints = settings.language_hints
-        runtime_settings.vocabulary_id = settings.vocabulary_id
+        # Only update fields that were explicitly provided in the request body
+        updates = settings.model_dump(exclude_unset=True)
+        if "language_hints" in updates:
+            runtime_settings.language_hints = updates["language_hints"]
+        if "vocabulary_id" in updates:
+            runtime_settings.vocabulary_id = updates["vocabulary_id"]
+        _save_settings(runtime_settings)
         add_log(
             "info",
             "运行配置已更新",
             {
-                "language_hints": settings.language_hints,
-                "vocabulary_id_set": bool(settings.vocabulary_id),
+                "language_hints": runtime_settings.language_hints,
+                "vocabulary_id_set": bool(runtime_settings.vocabulary_id),
             },
         )
         return runtime_settings
@@ -281,6 +305,9 @@ def create_app(
             "mime_type": file.content_type or "application/octet-stream",
             "bytes": len(audio_bytes),
         }
+        effective_vocabulary_id = _clean_optional_value(vocabulary_id) or runtime_settings.vocabulary_id
+        if effective_vocabulary_id:
+            log_details["vocabulary_id"] = effective_vocabulary_id
         add_log("info", "转写开始", log_details)
         try:
             text = await service.transcribe(
@@ -291,8 +318,7 @@ def create_app(
                 language=language,
                 language_hints=_parse_language_hints(language_hints)
                 or runtime_settings.language_hints,
-                vocabulary_id=_clean_optional_value(vocabulary_id)
-                or runtime_settings.vocabulary_id,
+                vocabulary_id=effective_vocabulary_id,
             )
         except (DashScopeError, DoubaoASRError) as exc:
             add_log("error", "转写失败", {**log_details, "error": str(exc)[:300]})
@@ -358,6 +384,41 @@ def create_app(
                 "vocabulary_id": result.get("vocabulary_id"),
             },
         )
+        return JSONResponse(result)
+
+    @app.get("/api/vocabularies")
+    async def list_vocabularies(
+        service: Transcriber = Depends(get_transcriber),
+    ) -> JSONResponse:
+        try:
+            vocabularies = await service.list_vocabularies()
+        except (DashScopeError, DoubaoASRError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse({"data": vocabularies})
+
+    @app.get("/api/vocabularies/{vocabulary_id}")
+    async def query_vocabulary(
+        vocabulary_id: str,
+        service: Transcriber = Depends(get_transcriber),
+    ) -> JSONResponse:
+        try:
+            result = await service.query_vocabulary(vocabulary_id=vocabulary_id)
+        except (DashScopeError, DoubaoASRError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse(result)
+
+    @app.delete("/api/vocabularies/{vocabulary_id}")
+    async def delete_vocabulary(
+        vocabulary_id: str,
+        service: Transcriber = Depends(get_transcriber),
+    ) -> JSONResponse:
+        add_log("info", "删除热词表", {"vocabulary_id": vocabulary_id})
+        try:
+            result = await service.delete_vocabulary(vocabulary_id=vocabulary_id)
+        except (DashScopeError, DoubaoASRError) as exc:
+            add_log("error", "删除热词表失败", {"vocabulary_id": vocabulary_id, "error": str(exc)[:300]})
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        add_log("info", "删除热词表成功", {"vocabulary_id": vocabulary_id})
         return JSONResponse(result)
 
     return app

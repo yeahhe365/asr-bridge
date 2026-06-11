@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class DashScopeError(RuntimeError):
@@ -58,6 +61,12 @@ class DashScopeFunASRClient:
             if result_url is None:
                 return ""
             return await self._download_transcript_text(client=client, result_url=result_url)
+        except DashScopeError:
+            raise
+        except httpx.HTTPError as exc:
+            raise DashScopeError(
+                f"DashScope network error ({type(exc).__name__}): {exc or 'no detail'}"
+            ) from exc
         finally:
             if close_client:
                 await client.aclose()
@@ -90,15 +99,32 @@ class DashScopeFunASRClient:
         if effective_vocabulary_id:
             payload["parameters"]["vocabulary_id"] = effective_vocabulary_id
 
-        response = await client.post(
-            f"{self.base_url}/services/audio/asr/transcription",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "X-DashScope-Async": "enable",
-            },
-            json=payload,
+        logger.info(
+            "DashScope submit: model=%s vocabulary_id=%s hints=%s",
+            model, effective_vocabulary_id or "-", effective_language_hints or "-",
         )
+
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    f"{self.base_url}/services/audio/asr/transcription",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "X-DashScope-Async": "enable",
+                    },
+                    json=payload,
+                )
+                break
+            except httpx.HTTPError as exc:
+                if attempt == 2:
+                    raise DashScopeError(
+                        f"DashScope submit failed after 3 attempts "
+                        f"({type(exc).__name__}): {exc or 'no detail'}"
+                    ) from exc
+                logger.warning("DashScope submit attempt %d failed: %s", attempt + 1, exc)
+                await asyncio.sleep(1.0 * (attempt + 1))
+
         data = self._json_or_error(response)
         output = data.get("output") or {}
         task_id = output.get("task_id")
@@ -144,6 +170,96 @@ class DashScopeFunASRClient:
             if not isinstance(output, dict) or not output.get("vocabulary_id"):
                 raise DashScopeError(f"DashScope did not return a vocabulary_id: {data}")
             return output
+        except DashScopeError:
+            raise
+        except httpx.HTTPError as exc:
+            raise DashScopeError(
+                f"DashScope network error ({type(exc).__name__}): {exc or 'no detail'}"
+            ) from exc
+        finally:
+            if close_client:
+                await client.aclose()
+
+    async def query_vocabulary(self, *, vocabulary_id: str) -> dict[str, object]:
+        """Query a vocabulary's status and details.
+
+        Returns the output dict which includes ``status`` (``"OK"`` or
+        ``"UNDEPLOYED"``) and the vocabulary entries.
+        """
+        return await self._vocabulary_action(
+            action="query_vocabulary",
+            extra_input={"vocabulary_id": vocabulary_id},
+        )
+
+    async def list_vocabularies(
+        self,
+        *,
+        prefix: str | None = None,
+        page_index: int = 0,
+        page_size: int = 50,
+    ) -> list[dict[str, object]]:
+        """List vocabularies owned by the current account.
+
+        Supports optional ``prefix`` filter and pagination.
+        """
+        extra: dict[str, object] = {
+            "page_index": page_index,
+            "page_size": page_size,
+        }
+        if prefix:
+            extra["prefix"] = prefix
+        result = await self._vocabulary_action(
+            action="list_vocabulary",
+            extra_input=extra,
+        )
+        vocabularies = result.get("vocabulary_list") or result.get("vocabularies")
+        if isinstance(vocabularies, list):
+            return vocabularies
+        return []
+
+    async def delete_vocabulary(self, *, vocabulary_id: str) -> dict[str, object]:
+        """Delete a vocabulary by its ID."""
+        return await self._vocabulary_action(
+            action="delete_vocabulary",
+            extra_input={"vocabulary_id": vocabulary_id},
+        )
+
+    async def _vocabulary_action(
+        self,
+        *,
+        action: str,
+        extra_input: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        client = self.http_client or httpx.AsyncClient(timeout=60)
+        close_client = self.http_client is None
+        input_payload: dict[str, object] = {"action": action}
+        if extra_input:
+            input_payload.update(extra_input)
+        try:
+            response = await client.post(
+                f"{self.base_url}/services/audio/asr/customization",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "speech-biasing",
+                    "input": input_payload,
+                },
+            )
+            data = self._json_or_error(response)
+            output = data.get("output")
+            if not isinstance(output, dict):
+                raise DashScopeError(
+                    f"DashScope vocabulary {action} returned unexpected response: {data}"
+                )
+            return output
+        except DashScopeError:
+            raise
+        except httpx.HTTPError as exc:
+            raise DashScopeError(
+                f"DashScope network error ({type(exc).__name__}): {exc or 'no detail'}"
+            ) from exc
         finally:
             if close_client:
                 await client.aclose()
@@ -153,12 +269,29 @@ class DashScopeFunASRClient:
     ) -> str | None:
         deadline = time.monotonic() + self.timeout_seconds
         last_payload: dict[str, Any] | None = None
+        consecutive_network_errors = 0
 
         while time.monotonic() < deadline:
-            response = await client.get(
-                f"{self.base_url}/tasks/{task_id}",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-            )
+            try:
+                response = await client.get(
+                    f"{self.base_url}/tasks/{task_id}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                consecutive_network_errors = 0
+            except httpx.HTTPError as exc:
+                consecutive_network_errors += 1
+                logger.warning(
+                    "DashScope poll network error (#%d): %s: %s",
+                    consecutive_network_errors, type(exc).__name__, exc or "no detail",
+                )
+                if consecutive_network_errors >= 5:
+                    raise DashScopeError(
+                        f"DashScope network error after {consecutive_network_errors} "
+                        f"retries ({type(exc).__name__}): {exc or 'no detail'}"
+                    ) from exc
+                await asyncio.sleep(self.poll_interval_seconds)
+                continue
+
             data = self._json_or_error(response)
             last_payload = data
             output = data.get("output") or {}
@@ -178,8 +311,28 @@ class DashScopeFunASRClient:
     async def _download_transcript_text(
         self, *, client: httpx.AsyncClient, result_url: str
     ) -> str:
-        response = await client.get(result_url)
-        data = self._json_or_error(response)
+        for attempt in range(3):
+            try:
+                response = await client.get(result_url)
+                break
+            except httpx.HTTPError as exc:
+                if attempt == 2:
+                    raise DashScopeError(
+                        f"DashScope download failed after 3 attempts "
+                        f"({type(exc).__name__}): {exc or 'no detail'}"
+                    ) from exc
+                logger.warning("DashScope download attempt %d failed: %s", attempt + 1, exc)
+                await asyncio.sleep(1.0 * (attempt + 1))
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DashScopeError(
+                f"DashScope transcript URL returned non-JSON {response.status_code}: "
+                f"{response.text[:500]}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise DashScopeError(f"DashScope transcript result is not a JSON object: {data}")
         transcripts = data.get("transcripts") or []
         texts = [
             str(transcript.get("text", "")).strip()
@@ -234,9 +387,14 @@ class DashScopeFunASRClient:
 
     def _data_uri(self, *, audio_bytes: bytes, mime_type: str) -> str:
         encoded = base64.b64encode(audio_bytes).decode("ascii")
-        return f"{mime_type};base64,{encoded}" if mime_type.startswith("data:") else (
-            f"data:{mime_type};base64,{encoded}"
-        )
+        # Strip any existing "data:" prefix to normalize
+        raw_mime = mime_type
+        if raw_mime.startswith("data:"):
+            raw_mime = raw_mime[len("data:"):]
+        # Strip any existing ";base64,..." suffix to get clean mime type
+        if ";base64" in raw_mime:
+            raw_mime = raw_mime.split(";base64")[0]
+        return f"data:{raw_mime};base64,{encoded}"
 
     def _dashscope_model(self, requested_model: str) -> str:
         if requested_model in {
